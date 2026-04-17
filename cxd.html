@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>DP KNB & IDOR Test Page</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .log {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 10px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .success { color: #4ec9b0; }
+        .fail { color: #f48771; }
+        .info { color: #9cdcfe; }
+        .warn { color: #dcdcaa; }
+    </style>
+</head>
+<body>
+    <h2>DP APP 内 KNB/IDOR 测试页</h2>
+    <button onclick="startAllTests()">开始执行所有测试</button>
+    <div id="log" class="log"></div>
+
+    <script>
+        const logDiv = document.getElementById('log');
+        function log(msg, type='info') {
+            const p = document.createElement('div');
+            p.className = type;
+            p.textContent = msg;
+            logDiv.appendChild(p);
+            console.log(msg);
+        }
+
+        // ========== 1. KNB 桥接通用封装 ==========
+        function callKNB(method, params = {}) {
+            const bridge = window.KNBCore || window.DPApp || window.KNB;
+            if (!bridge) {
+                log('[-] 未找到KNB桥接对象，请在DP APP内打开页面', 'fail');
+                return Promise.reject('No bridge');
+            }
+
+            log(`[*] 调用KNB方法: ${method}，参数: ${JSON.stringify(params)}`, 'info');
+            return new Promise((resolve, reject) => {
+                bridge.sendMessage(
+                    method,
+                    params,
+                    {
+                        success: (res) => {
+                            log(`[+] ${method} 调用成功: ${JSON.stringify(res)}`, 'success');
+                            resolve(res);
+                        },
+                        fail: (err) => {
+                            log(`[-] ${method} 调用失败: ${JSON.stringify(err)}`, 'fail');
+                            reject(err);
+                        }
+                    }
+                );
+            });
+        }
+
+        // ========== 2. Schema 跳转测试 ==========
+        function testSchema(url) {
+            log(`[*] 测试Schema跳转: ${url}`, 'info');
+            const a = document.createElement('a');
+            a.href = url;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        // ========== 3. 批量执行所有测试 ==========
+        async function startAllTests() {
+            log('===== 开始执行DP APP内测试 =====', 'info');
+
+            // 测试1: 获取用户信息
+            try {
+                await callKNB('getUserInfo');
+            } catch(e) {}
+
+            // 测试2: 获取定位
+            try {
+                await callKNB('getLocation', { accuracy: 'high' });
+            } catch(e) {}
+
+            // 测试3: 获取设备ID
+            try {
+                await callKNB('getDeviceId');
+            } catch(e) {}
+
+            // 测试4: 读取剪贴板
+            try {
+                await callKNB('getClipboard');
+            } catch(e) {}
+
+            // 测试5: 唤起扫码
+            try {
+                await callKNB('scanCode');
+            } catch(e) {}
+
+            // 测试6: Schema跳转测试
+            const schemas = [
+                'dianping://user/wallet',
+                'dianping://order/list',
+                'dianping://user/setting',
+                'dianping://user/account/safe'
+            ];
+            schemas.forEach(s => testSchema(s));
+
+            // 测试7: 环境检测
+            log(`[*] 当前UA: ${navigator.userAgent}`, 'info');
+            log(`[*] 是否APP内: ${/dpapp/.test(navigator.userAgent) ? '是' : '否'}`, 'info');
+
+            log('===== 所有测试执行完毕 =====', 'info');
+        }
+    </script>
+</body>
+</html>
